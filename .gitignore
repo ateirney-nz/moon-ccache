@@ -1,0 +1,9 @@
+target/
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/local-history/
+.env
+.env.local

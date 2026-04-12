@@ -1,0 +1,40 @@
+[package]
+name = "cli"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "ccache"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ccache"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+flate2 = { workspace = true }
+fs-err = { workspace = true }
+globset = { workspace = true }
+fspy = { workspace = true }
+fspy_shared = { workspace = true }
+hex = { workspace = true }
+moon_config = { workspace = true }
+moon_project = { workspace = true }
+moon_task = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }

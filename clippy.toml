@@ -1,0 +1,20 @@
+# Clippy configuration
+
+# Maximum cognitive complexity allowed before clippy warns
+cognitive-complexity-threshold = 30
+
+# Type complexity threshold
+type-complexity-threshold = 500
+
+# Too many args threshold
+too-many-arguments-threshold = 8
+
+# Disallow implementation of certain patterns
+disallowed-names = ["foo", "bar", "baz"]
+
+# Warn on all wildcard imports
+warn-on-all-wildcard-imports = true
+
+# Allow unwrap/expect in tests
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true

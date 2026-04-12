@@ -1,0 +1,47 @@
+# Rustfmt configuration
+
+# Edition
+edition = "2024"
+
+# Line width
+max_width = 100
+
+# Indentation
+hard_tabs = false
+tab_spaces = 4
+
+# Formatting
+use_small_heuristics = "Default"
+format_strings = true
+normalize_comments = true
+comment_width = 80
+
+# Imports
+reorder_imports = true
+reorder_modules = true
+remove_nested_parens = true
+
+# Functions
+fn_single_line = false
+where_single_line = false
+
+# Style
+match_block_trailing_comma = false
+force_explicit_abi = true
+force_multiline_blocks = false
+
+# Spacing
+space_after_colon = true
+space_before_colon = false
+spaces_around_ranges = false
+
+# Chain width
+chain_width = 60
+
+# Closures
+match_arm_leading_pipes = "Never"
+
+# Misc
+use_try_shorthand = true
+use_field_init_shorthand = true
+
