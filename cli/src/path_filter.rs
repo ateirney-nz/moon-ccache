@@ -44,13 +44,13 @@ impl PathFilter {
     }
 
     /// Normalise a CLI-supplied `--exclude` pattern to a workspace-relative glob.
-    fn resolve_cli_pattern(bare: &str, project_prefix: &str) -> String {
-        if let Some(ws_rel) = bare.strip_prefix('/') {
+    fn resolve_cli_pattern(pattern: &str, project_prefix: &str) -> String {
+        if let Some(ws_rel) = pattern.strip_prefix('/') {
             ws_rel.to_string()
         } else if project_prefix.is_empty() {
-            bare.to_string()
+            pattern.to_string()
         } else {
-            format!("{project_prefix}/{bare}")
+            format!("{project_prefix}/{pattern}")
         }
     }
 

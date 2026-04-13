@@ -1,11 +1,11 @@
-//! Execution store, content-addressed storage (CAS), and declared cache key computation.
+//! Execution store, content-addressed storage (CAS), and execution key computation.
 
 mod cas;
 mod execution;
 mod key;
 
 pub(crate) use execution::Execution;
-pub(crate) use key::declared_cache_key;
+pub(crate) use key::execution_key;
 
 use anyhow::Result;
 use rayon::prelude::*;
@@ -13,13 +13,11 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::fingerprint::{PathFingerprint, PathRead, fingerprint_path};
-use crate::manifest::TraceManifest;
+use crate::path_fingerprint::{PathFingerprint, fingerprint_path};
 
-pub(crate) const MAX_EXECUTIONS: usize = 10;
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
-const JSON_EXTENSION: &str = "json";
+const MAX_EXECUTIONS: usize = 10;
 
 /// Filesystem-backed cache: execution store for trace manifest JSON files and a
 /// content-addressed store for output archives.
@@ -44,17 +42,17 @@ impl Cache {
         })
     }
 
-    fn vlog(&self, args: std::fmt::Arguments<'_>) {
+    fn log_verbose(&self, args: std::fmt::Arguments<'_>) {
         if self.verbose {
             eprintln!("{args}");
         }
     }
 
-    /// Search for the newest matching execution under `declared_key`.
+    /// Search for the newest matching execution under `execution_key`.
     ///
     /// ## Execution resolution algorithm
     ///
-    /// 1. List all `*.json` files in `manifests/<declared_key>/`.
+    /// 1. List all `*.json.zst` files in `manifests/<execution_key>/`.
     /// 2. Sort them **newest-first** by filename (timestamp prefix makes this correct).
     /// 3. Consider only the newest [`MAX_EXECUTIONS`] entries to bound lookup time.
     /// 4. For each execution (newest first):
@@ -67,20 +65,20 @@ impl Cache {
     /// 5. Return the first execution that passes both checks, or `None` if none match.
     pub(crate) fn find_matching_execution(
         &self,
-        declared_key: &str,
+        execution_key: &str,
         workspace_root: &Path,
     ) -> Result<Option<Execution>> {
-        let key_dir = self.manifests_dir.join(declared_key);
+        let key_dir = self.manifests_dir.join(execution_key);
 
         let mut executions: Vec<PathBuf> = match fs_err::read_dir(&key_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| {
-                    p.extension().is_some_and(|e| e == JSON_EXTENSION)
-                        && !p
-                            .file_name()
-                            .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                    p.file_name().is_some_and(|n| {
+                        !n.to_string_lossy().starts_with('.')
+                            && n.to_string_lossy().ends_with(".json.zst")
+                    })
                 })
                 .collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -92,31 +90,40 @@ impl Cache {
         executions.sort_unstable_by(|a, b| b.file_name().cmp(&a.file_name()));
         executions.truncate(MAX_EXECUTIONS);
 
-        // Fingerprint cache shared across executions: (path, PathRead) → PathFingerprint.
-        // Keyed by both the path and the access detail level so that a path cached as
+        // Fingerprint cache shared across executions: (path, read_dir) → PathFingerprint.
+        // Keyed by both the path and the directory read flag so that a path cached as
         // Directory(None) (presence-only) does not produce a stale hit when a later
         // execution needs Directory(Some(_)) (full listing), and vice versa.
-        let mut fingerprint_cache: HashMap<(PathBuf, PathRead), PathFingerprint> =
-            HashMap::new();
+        let mut fingerprint_cache: HashMap<(PathBuf, bool), PathFingerprint> = HashMap::new();
 
         for path in executions {
-            let bytes = match fs_err::read(&path) {
+            let compressed = match fs_err::read(&path) {
                 Ok(b) => b,
                 Err(e) => {
-                    self.vlog(format_args!("  skip {} (read error: {e})", path.display()));
+                    self.log_verbose(format_args!("  skip {} (read error: {e})", path.display()));
+                    continue;
+                }
+            };
+            let bytes = match zstd::decode_all(std::io::Cursor::new(&compressed)) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.log_verbose(format_args!(
+                        "  skip {} (decompress error: {e})",
+                        path.display()
+                    ));
                     continue;
                 }
             };
             let execution: Execution = match serde_json::from_slice(&bytes) {
                 Ok(c) => c,
                 Err(e) => {
-                    self.vlog(format_args!("  skip {} (parse error: {e})", path.display()));
+                    self.log_verbose(format_args!("  skip {} (parse error: {e})", path.display()));
                     continue;
                 }
             };
 
             if execution.schema_version != SCHEMA_VERSION {
-                self.vlog(format_args!(
+                self.log_verbose(format_args!(
                     "  skip {} (incompatible schema: was {}, now {})",
                     path.display(),
                     execution.schema_version,
@@ -124,45 +131,45 @@ impl Cache {
                 ));
                 continue;
             }
-            self.vlog(format_args!(
+            self.log_verbose(format_args!(
                 "  checking execution {}",
-                execution.execution_id
+                execution.id
             ));
 
             let meta_start = std::time::Instant::now();
-            let meta_valid = self.inputs_meta_valid(&execution.manifest, workspace_root);
-            self.vlog(format_args!(
+            let meta_valid = self.inputs_meta_valid(&execution.inputs, workspace_root);
+            self.log_verbose(format_args!(
                 "    metadata check: {:.1?}",
                 meta_start.elapsed()
             ));
             if !meta_valid {
-                self.vlog(format_args!(
+                self.log_verbose(format_args!(
                     "  execution {} does not match (metadata changed)",
-                    execution.execution_id
+                    execution.id
                 ));
                 continue;
             }
 
             let digest_start = std::time::Instant::now();
             let digest_valid = self.inputs_content_valid(
-                &execution.manifest,
+                &execution.inputs,
                 workspace_root,
                 &mut fingerprint_cache,
             )?;
-            self.vlog(format_args!(
+            self.log_verbose(format_args!(
                 "    digest check: {:.1?}",
                 digest_start.elapsed()
             ));
             if digest_valid {
-                self.vlog(format_args!(
+                self.log_verbose(format_args!(
                     "  execution {} matched",
-                    execution.execution_id
+                    execution.id
                 ));
                 return Ok(Some(execution));
             }
-            self.vlog(format_args!(
+            self.log_verbose(format_args!(
                 "  execution {} does not match (content changed)",
-                execution.execution_id
+                execution.id
             ));
         }
 
@@ -170,8 +177,12 @@ impl Cache {
     }
 
     /// First pass: stat-only check for every input. Fast — no file reads.
-    fn inputs_meta_valid(&self, manifest: &TraceManifest, workspace_root: &Path) -> bool {
-        for (path_str, expected) in &manifest.inputs {
+    fn inputs_meta_valid(
+        &self,
+        inputs: &HashMap<String, PathFingerprint>,
+        workspace_root: &Path,
+    ) -> bool {
+        for (path_str, expected) in inputs {
             let path = workspace_root.join(path_str);
             let valid = match expected {
                 PathFingerprint::NotFound => matches!(
@@ -181,7 +192,7 @@ impl Cache {
                 PathFingerprint::File { size, .. } => match std::fs::metadata(&path) {
                     Ok(m) if m.is_file() && m.len() == *size => true,
                     Ok(m) if m.is_file() => {
-                        self.vlog(format_args!(
+                        self.log_verbose(format_args!(
                             "    input changed: {path_str} (size {} → {})",
                             size,
                             m.len()
@@ -190,12 +201,10 @@ impl Cache {
                     }
                     _ => false,
                 },
-                PathFingerprint::Directory(_) => {
-                    std::fs::metadata(&path).is_ok_and(|m| m.is_dir())
-                }
+                PathFingerprint::Directory(_) => std::fs::metadata(&path).is_ok_and(|m| m.is_dir()),
             };
             if !valid {
-                self.vlog(format_args!(
+                self.log_verbose(format_args!(
                     "    input changed: {path_str} (metadata mismatch)"
                 ));
                 return false;
@@ -208,50 +217,45 @@ impl Cache {
     /// Uncached inputs are fingerprinted in parallel via rayon.
     fn inputs_content_valid(
         &self,
-        manifest: &TraceManifest,
+        inputs: &HashMap<String, PathFingerprint>,
         workspace_root: &Path,
-        fingerprint_cache: &mut HashMap<(PathBuf, PathRead), PathFingerprint>,
+        fingerprint_cache: &mut HashMap<(PathBuf, bool), PathFingerprint>,
     ) -> Result<bool> {
-        let uncached: Vec<(PathBuf, PathRead)> = manifest
-            .inputs
+        let uncached: Vec<(PathBuf, bool)> = inputs
             .iter()
             .filter_map(|(path_str, expected)| {
                 let path = workspace_root.join(path_str.as_str());
-                let path_read = PathRead {
-                    read_dir_entries: matches!(expected, PathFingerprint::Directory(Some(_))),
-                };
-                if fingerprint_cache.contains_key(&(path.clone(), path_read)) {
+                let read_dir = matches!(expected, PathFingerprint::Directory(Some(_)));
+                if fingerprint_cache.contains_key(&(path.clone(), read_dir)) {
                     return None;
                 }
-                Some((path, path_read))
+                Some((path, read_dir))
             })
             .collect();
 
-        let new_fingerprints: Vec<(PathBuf, PathRead, PathFingerprint)> = uncached
+        let new_fingerprints: Vec<(PathBuf, bool, PathFingerprint)> = uncached
             .into_par_iter()
-            .map(|(path, path_read)| {
-                let fp = fingerprint_path(&path, path_read)?;
-                Ok((path, path_read, fp))
+            .map(|(path, read_dir)| {
+                let fp = fingerprint_path(&path, read_dir)?;
+                Ok((path, read_dir, fp))
             })
             .collect::<Result<_>>()?;
 
-        for (path, path_read, fp) in new_fingerprints {
-            fingerprint_cache.insert((path, path_read), fp);
+        for (path, read_dir, fp) in new_fingerprints {
+            fingerprint_cache.insert((path, read_dir), fp);
         }
 
-        for (path_str, expected) in &manifest.inputs {
+        for (path_str, expected) in inputs {
             let path = workspace_root.join(path_str.as_str());
-            let path_read = PathRead {
-                read_dir_entries: matches!(expected, PathFingerprint::Directory(Some(_))),
-            };
-            let Some(current) = fingerprint_cache.get(&(path, path_read)) else {
-                self.vlog(format_args!(
+            let read_dir = matches!(expected, PathFingerprint::Directory(Some(_)));
+            let Some(current) = fingerprint_cache.get(&(path, read_dir)) else {
+                self.log_verbose(format_args!(
                     "    input changed: {path_str} (not fingerprinted)"
                 ));
                 return Ok(false);
             };
             if current != expected {
-                self.vlog(format_args!(
+                self.log_verbose(format_args!(
                     "    input changed: {path_str} (fingerprint mismatch)"
                 ));
                 return Ok(false);
@@ -261,36 +265,39 @@ impl Cache {
         Ok(true)
     }
 
-    /// Pack `outputs` plus captured stdout/stderr into a content-addressed gzip tarball.
-    pub(crate) fn create_tarball(
+    /// Store `outputs` plus captured stdout/stderr into a content-addressed archive.
+    pub(crate) fn store_outputs(
         &self,
         workspace_root: &Path,
         outputs: &[PathBuf],
-        stdout: &[u8],
-        stderr: &[u8],
+        stdout: &mut std::fs::File,
+        stderr: &mut std::fs::File,
     ) -> Result<(String, u64)> {
-        cas::create_tarball(&self.cas_dir, workspace_root, outputs, stdout, stderr)
+        cas::store_outputs(&self.cas_dir, workspace_root, outputs, stdout, stderr)
     }
 
-    /// Restore a previously recorded execution from the output archive referenced by `execution`.
-    pub(crate) fn restore_from_cas(
+    /// Restore a previously recorded execution from the output archive.
+    pub(crate) fn restore_outputs(
         &self,
-        execution: &Execution,
         workspace_root: &Path,
+        archive_key: &str,
+        archive_size: u64,
     ) -> Result<()> {
-        cas::restore_from_cas(&self.cas_dir, execution, workspace_root)
+        cas::restore_outputs(&self.cas_dir, workspace_root, archive_key, archive_size)
     }
 
-    /// Serialise `execution` to `manifests/<declared_key>/<execution_id>.json`.
+    /// Serialise `execution` to `manifests/<execution_key>/<execution_id>.json`.
     ///
     /// Written directly without an atomic rename — the UUID suffix in `execution_id`
     /// prevents name collisions between concurrent writers, and partial writes are safely
     /// skipped by the JSON parser in [`find_matching_execution`](Self::find_matching_execution).
-    pub(crate) fn record_execution(&self, declared_key: &str, execution: Execution) -> Result<()> {
-        let key_dir = self.manifests_dir.join(declared_key);
+    pub(crate) fn store_execution(&self, execution_key: &str, execution: Execution) -> Result<()> {
+        let key_dir = self.manifests_dir.join(execution_key);
         fs_err::create_dir_all(&key_dir)?;
-        let final_path = key_dir.join(format!("{}.json", execution.execution_id));
-        fs_err::write(&final_path, serde_json::to_vec(&execution)?)?;
+        let final_path = key_dir.join(format!("{}.json.zst", execution.id));
+        let json_bytes = serde_json::to_vec(&execution)?;
+        let compressed = zstd::encode_all(std::io::Cursor::new(&json_bytes), 3)?;
+        fs_err::write(&final_path, compressed)?;
         Ok(())
     }
 }

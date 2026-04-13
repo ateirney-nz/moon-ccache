@@ -6,20 +6,22 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::paths::to_relative_path;
+use crate::path_utils::to_relative_path;
 use crate::task_info::TaskInfo;
 
-/// Compute the declared cache key — the manifest directory name under which executions
+/// Compute the execution key — the manifest directory name under which executions
 /// are stored.
 ///
-/// Built entirely from static, declared information (no runtime file tracing). All
+/// Built from static task metadata and environment; no runtime file tracing. All
 /// components are fed into an **XXH3** hasher and the result is formatted as a
 /// 16-character lowercase hex string. The key covers:
 /// - The Moon target name
 /// - The exact command line
 /// - The XXH3 hash of declared input file contents (from the Moon snapshot)
+/// - Task-declared `env` values (sorted by key for stability)
+/// - Runtime values of `input_env` variables (resolved from the process environment)
 /// - Any `--exclude` patterns
-pub(crate) fn declared_cache_key(
+pub(crate) fn execution_key(
     target: &str,
     command: &[String],
     task_info: &TaskInfo,
@@ -39,6 +41,25 @@ pub(crate) fn declared_cache_key(
     hasher.update(input_key.as_bytes());
     hasher.update(b"\x01");
 
+    // Task-declared env values (BTreeMap is already sorted).
+    for (key, value) in &task_info.env {
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(b"\x01");
+
+    // input_env: runtime values resolved from the process environment (pre-sorted in TaskInfo).
+    for key in &task_info.input_env {
+        let value = std::env::var(key).unwrap_or_default();
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.update(b"\x01");
+
     for pat in excludes {
         hasher.update(pat.as_bytes());
         hasher.update(b"\0");
@@ -50,7 +71,7 @@ pub(crate) fn declared_cache_key(
 ///
 /// Uses workspace-relative paths as keys so the digest is stable regardless of where
 /// the workspace is checked out. Hashing is parallelised via rayon.
-pub(crate) fn paths_content_hash(files: &[PathBuf], workspace_root: &Path) -> Result<String> {
+fn paths_content_hash(files: &[PathBuf], workspace_root: &Path) -> Result<String> {
     let mut hashes: Vec<(String, u64)> = files
         .par_iter()
         .map(|p| {

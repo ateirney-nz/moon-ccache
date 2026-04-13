@@ -18,11 +18,10 @@ suspicious = "warn"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
-flate2 = "1"
+zstd = "0.13"
 fs-err = "3.0"
 globset = "0.4"
 fspy = { git = "https://github.com/voidzero-dev/vite-task.git", branch = "main" }
-fspy_shared = { git = "https://github.com/voidzero-dev/vite-task.git", branch = "main" }
 hex = "0.4"
 moon_config = { version = "2.0.9" }
 moon_project = { version = "2.0.3" }

@@ -51,31 +51,16 @@ pub(crate) enum DirEntryKind {
     Symlink,
 }
 
-/// Describes how a path was accessed during the traced run.
-///
-/// Passed to [`fingerprint_path`] to control the level of detail captured for
-/// directories: presence-only vs. full entry listing.
-///
-/// Also used as part of the fingerprint cache key so that the same path cached at
-/// different detail levels (presence-only vs. full listing) does not produce stale hits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PathRead {
-    /// Whether the process called `readdir`/`getdents` on this path (fspy `READ_DIR` flag).
-    /// When `false` the directory was only opened, not listed.
-    pub(crate) read_dir_entries: bool,
-}
-
 /// Fingerprint a single path (file or directory).
 ///
 /// - Files: streams content through XXH3-64 and returns [`PathFingerprint::File`].
-/// - Directories: returns [`PathFingerprint::Directory`]. When
-///   [`PathRead::read_dir_entries`] is `true` (fspy reported `READ_DIR` on this path),
-///   the entry listing is captured. When `false`, only presence is recorded and the
-///   inner map is `None`.
+/// - Directories: returns [`PathFingerprint::Directory`]. When `read_dir` is `true`
+///   (fspy reported `READ_DIR` on this path), the entry listing is captured. When
+///   `false`, only presence is recorded and the inner map is `None`.
 /// - Missing paths: returns [`PathFingerprint::NotFound`].
 ///
 /// Symlinks are followed so the fingerprint reflects the resolved target.
-pub(crate) fn fingerprint_path(path: &Path, path_read: PathRead) -> Result<PathFingerprint> {
+pub(crate) fn fingerprint_path(path: &Path, read_dir: bool) -> Result<PathFingerprint> {
     // Stat first to distinguish files from directories without relying on
     // platform-specific open-directory error codes.
     let meta = match std::fs::metadata(path) {
@@ -93,7 +78,7 @@ pub(crate) fn fingerprint_path(path: &Path, path_read: PathRead) -> Result<PathF
     };
 
     if meta.is_dir() {
-        return process_directory(path, path_read.read_dir_entries);
+        return fingerprint_directory(path, read_dir);
     }
 
     // Regular file (or symlink resolved to a file).
@@ -101,21 +86,17 @@ pub(crate) fn fingerprint_path(path: &Path, path_read: PathRead) -> Result<PathF
         Ok(f) => f,
         Err(e) => {
             if e.kind() != io::ErrorKind::NotFound {
-                eprintln!(
-                    "ccache: unexpected error opening {}: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("ccache: unexpected error opening {}: {}", path.display(), e);
             }
             return Ok(PathFingerprint::NotFound);
         }
     };
 
-    hash_file_content(io::BufReader::new(file))
+    fingerprint_file(io::BufReader::new(file))
 }
 
 /// Stream a file through XXH3-64 and return its fingerprint (hash + byte length).
-fn hash_file_content(mut reader: impl BufRead) -> Result<PathFingerprint> {
+fn fingerprint_file(mut reader: impl BufRead) -> Result<PathFingerprint> {
     let mut hasher = Xxh3::new();
     let mut size = 0u64;
     loop {
@@ -140,7 +121,7 @@ fn hash_file_content(mut reader: impl BufRead) -> Result<PathFingerprint> {
 /// tracked. When `true`, lists entries into a sorted [`BTreeMap`] and returns
 /// `Directory(Some(_))`. `.DS_Store` entries are skipped. Note: `read_dir` never yields
 /// `.` or `..` on any supported platform, so those do not need to be filtered.
-fn process_directory(path: &Path, read_dir_entries: bool) -> Result<PathFingerprint> {
+fn fingerprint_directory(path: &Path, read_dir_entries: bool) -> Result<PathFingerprint> {
     if !read_dir_entries {
         return Ok(PathFingerprint::Directory(None));
     }
